@@ -1,4 +1,4 @@
-name: Flutter Windows Build
+name: Flutter Web Build
 
 on:
   push:
@@ -6,26 +6,29 @@ on:
       - 'v*'
   workflow_dispatch:  # 手动触发选项
     inputs:
-      build_type:
-        description: 'Build Type'
+      build_mode:
+        description: 'Build Mode'
         required: true
         default: 'release'
         type: choice
         options:
           - debug
+          - profile
           - release
-      version_name:
-        description: 'Version Name (optional)'
+      base_href:
+        description: 'Base href for deployment (optional)'
         required: false
         type: string
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 jobs:
-  build-windows:
-    name: Build Windows
-    runs-on: windows-latest
+  build-web:
+    name: Build Flutter Web
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -40,126 +43,202 @@ jobs:
       - name: Get dependencies
         run: flutter pub get
 
-      - name: Setup Windows Desktop
+      - name: Setup Web
         run: |
-          # 确保 Windows 桌面支持已启用
-          flutter config --enable-windows-desktop
+          # 确保 Web 支持已启用
+          flutter config --enable-web
           
-          # 如果还没有 Windows 平台，创建它
-          if (!(Test-Path -Path "windows")) {
-            flutter create --platforms=windows .
-          }
-
-      - name: Install Windows build tools
-        run: |
-          # 安装 Visual Studio 构建工具（如果尚未安装）
-          choco install visualstudio2022buildtools -y --no-progress
-          choco install visualstudio2022-workload-vctools -y --no-progress
+          # 如果还没有 Web 平台，创建它
+          if [ ! -d "web" ]; then
+            flutter create --platforms=web .
+          fi
 
       - name: Check Flutter doctor
         run: flutter doctor -v
 
-      - name: Build Windows
+      - name: Build Flutter Web
         id: build
         run: |
-          $buildType = "${{ github.event.inputs.build_type || 'release' }}"
-          $versionName = "${{ github.event.inputs.version_name || '' }}"
+          BUILD_MODE="${{ github.event.inputs.build_mode || 'release' }}"
+          BASE_HREF="${{ github.event.inputs.base_href || '/' }}"
           
-          Write-Host "Building Windows $buildType version..."
+          echo "Building Flutter Web in $BUILD_MODE mode..."
+          echo "Base href: $BASE_HREF"
           
-          if ($buildType -eq "debug") {
-            flutter build windows --debug
-            $outputDir = "build/windows/runner/Debug"
-            $outputName = "lhht-windows-debug"
-          } else {
-            flutter build windows --release
-            $outputDir = "build/windows/runner/Release"
-            $outputName = "lhht-windows-release"
-          }
+          if [ "$BUILD_MODE" = "debug" ]; then
+            flutter build web --debug --web-renderer canvaskit --base-href "$BASE_HREF"
+            OUTPUT_NAME="lhht-web-debug"
+          elif [ "$BUILD_MODE" = "profile" ]; then
+            flutter build web --profile --web-renderer canvaskit --base-href "$BASE_HREF"
+            OUTPUT_NAME="lhht-web-profile"
+          else
+            flutter build web --release --web-renderer canvaskit --base-href "$BASE_HREF"
+            OUTPUT_NAME="lhht-web-release"
+          fi
           
-          # 如果有自定义版本名，添加到文件名
-          if ($versionName -ne "") {
-            $outputName = "lhht-windows-$versionName"
-          }
-          
-          # 创建 ZIP 包
-          cd $outputDir
-          Compress-Archive -Path * -DestinationPath "../../../$outputName.zip" -Force
-          
-          # 保存路径供后续步骤使用
-          echo "output_path=../../../$outputName.zip" >> $env:GITHUB_OUTPUT
-          echo "output_name=$outputName.zip" >> $env:GITHUB_OUTPUT
+          # 添加构建时间信息
+          BUILD_DATE=$(date +"%Y%m%d_%H%M%S")
+          echo "build_date=$BUILD_DATE" >> $GITHUB_OUTPUT
+          echo "output_name=$OUTPUT_NAME" >> $GITHUB_OUTPUT
+          echo "build_mode=$BUILD_MODE" >> $GITHUB_OUTPUT
 
-      - name: Create Standalone Package
+      - name: Generate version info
         run: |
-          $buildType = "${{ github.event.inputs.build_type || 'release' }}"
+          # 创建版本信息文件
+          BUILD_DATE=$(date +"%Y-%m-%d %H:%M:%S")
+          GIT_TAG="${{ github.ref_name }}"
+          GIT_COMMIT="${{ github.sha }}"
           
-          if ($buildType -eq "debug") {
-            $sourceDir = "build/windows/runner/Debug"
-            $packageName = "lhht-windows-debug-package"
-          } else {
-            $sourceDir = "build/windows/runner/Release"
-            $packageName = "lhht-windows-release-package"
+          cat > build/web/version.json << EOF
+          {
+            "version": "${GIT_TAG:-dev}",
+            "build_date": "$BUILD_DATE",
+            "commit_hash": "$GIT_COMMIT",
+            "build_mode": "${{ steps.build.outputs.build_mode }}",
+            "flutter_version": "3.29.2"
           }
+          EOF
           
-          # 创建包含所有文件的包目录
-          $packageDir = "build/$packageName"
-          New-Item -ItemType Directory -Path $packageDir -Force
+          # 创建部署说明
+          cat > build/web/DEPLOYMENT.md << EOF
+          # Flutter Web 部署说明
           
-          # 复制所有文件
-          Copy-Item -Path "$sourceDir/*" -Destination $packageDir/ -Recurse -Force
+          ## 构建信息
+          - 版本: ${GIT_TAG:-dev}
+          - 构建时间: $BUILD_DATE
+          - 构建模式: ${{ steps.build.outputs.build_mode }}
+          - Git Commit: $GIT_COMMIT
           
-          # 创建启动脚本
-          @'
-@echo off
-echo Starting Lhht AI Assistant...
-start "" "Runner.exe"
-echo Application started!
-pause
-'@ | Out-File -FilePath "$packageDir/启动程序.bat" -Encoding UTF8
+          ## 部署方式
           
-          # 创建 README 文件
-          @'
-# Lhht AI Assistant Windows 版本
+          ### 1. 静态服务器部署
+          直接将 build/web 目录上传到任何静态服务器即可。
+          
+          ### 2. Nginx 配置示例
+          \`\`\`nginx
+          server {
+              listen 80;
+              server_name your-domain.com;
+              
+              location / {
+                  root /path/to/build/web;
+                  try_files \$uri \$uri/ /index.html;
+                  index index.html;
+              }
+          }
+          \`\`\`
+          
+          ### 3. GitHub Pages 部署
+          已自动配置 GitHub Pages，访问: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+          
+          ## 注意事项
+          1. 确保服务器配置了正确的 MIME 类型
+          2. 如果使用子目录部署，请更新 base-href
+          3. 建议启用 gzip 压缩
+          EOF
 
-## 使用方法：
-1. 解压此文件夹到任意位置
-2. 双击运行 "启动程序.bat" 或直接运行 "Runner.exe"
-
-## 注意事项：
-- 请勿删除文件夹内的任何文件
-- 建议将整个文件夹放在非系统盘
-- 确保系统已安装 Visual C++ 运行时库
-
-如有问题，请联系技术支持。
-'@ | Out-File -FilePath "$packageDir/README.txt" -Encoding UTF8
-          
-          # 压缩整个包
-          Compress-Archive -Path "$packageDir/*" -DestinationPath "build/$packageName.zip" -Force
-
-      - name: Upload Windows Artifact
+      - name: Upload Web Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: windows-build
-          path: |
-            build/*.zip
-            build/windows-package/
+          name: web-build
+          path: build/web/
+          retention-days: 7
 
-      - name: Create GitHub Release (仅限标签触发)
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload to GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: build/web/
+
+      - name: Deploy to GitHub Pages
+        if: github.event_name != 'workflow_dispatch' || github.event.inputs.deploy_to_pages == 'true'
+        uses: actions/deploy-pages@v4
+        id: deployment
+
+  create-release:
+    name: Create Release
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [build-web]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download Web Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: web-build
+          path: web-build
+
+      - name: Create ZIP package
         run: |
-          $tagName = "${{ github.ref }}" -replace 'refs/tags/', ''
-          $releaseName = "Windows Build $tagName"
+          cd web-build
+          zip -r ../lhht-web-${{ github.ref_name }}.zip .
+          cd ..
           
-          echo "Creating release for tag: $tagName"
-          
-          # 这里可以使用 GitHub CLI 或其他方式创建发布
-          # 由于权限已配置，softprops/action-gh-release 会在后续步骤中处理
-          
-      - name: Output Build Info
+          # 计算文件大小
+          FILESIZE=$(stat -c%s "lhht-web-${{ github.ref_name }}.zip")
+          echo "文件大小: $(echo "scale=2; $FILESIZE/1024/1024" | bc) MB"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          token: ${{ github.token }}
+          tag_name: ${{ github.ref_name }}
+          name: Release ${{ github.ref_name }}
+          draft: false
+          prerelease: false
+          files: |
+            lhht-web-${{ github.ref_name }}.zip
+          body: |
+            # Flutter Web 版本发布
+            
+            ## 构建信息
+            - 版本: ${{ github.ref_name }}
+            - 构建模式: ${{ needs.build-web.outputs.build_mode }}
+            - 构建时间: ${{ needs.build-web.outputs.build_date }}
+            
+            ## 使用说明
+            
+            ### 1. 在线访问
+            GitHub Pages: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/
+            
+            ### 2. 本地部署
+            1. 下载 lhht-web-${{ github.ref_name }}.zip
+            2. 解压到任意目录
+            3. 使用任何 HTTP 服务器托管
+            4. 访问 http://localhost:8080
+            
+            ### 3. 快速本地测试
+            ```bash
+            # 使用 Python 简单服务器
+            python3 -m http.server 8080 --directory web-build/
+            ```
+            
+            ## 文件清单
+            - `lhht-web-${{ github.ref_name }}.zip` - 完整的 Web 构建包
+
+  output-summary:
+    name: Build Summary
+    runs-on: ubuntu-latest
+    needs: [build-web]
+    if: always()
+    steps:
+      - name: Print Build Summary
         run: |
-          echo "=== 构建完成 ==="
-          echo "构建类型: ${{ github.event.inputs.build_type || 'release' }}"
-          echo "版本名称: ${{ github.event.inputs.version_name || '未指定' }}"
-          echo "触发方式: ${{ github.event_name }}"
-          echo "输出文件: ${{ steps.build.outputs.output_name }}"
+          echo "=== Flutter Web 构建完成 ==="
+          echo "构建模式: ${{ needs.build-web.outputs.build_mode }}"
+          echo "输出名称: ${{ needs.build-web.outputs.output_name }}"
+          echo "构建时间: ${{ needs.build-web.outputs.build_date }}"
+          echo "触发事件: ${{ github.event_name }}"
+          
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "手动触发参数:"
+            echo "  - 构建模式: ${{ github.event.inputs.build_mode || 'release' }}"
+            echo "  - Base href: ${{ github.event.inputs.base_href || '/' }}"
+          fi
+          
+          echo "=== 部署信息 ==="
+          echo "GitHub Pages URL: https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"
+          echo "构建产物已保存为 Artifact"
