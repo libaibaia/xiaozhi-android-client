@@ -85,7 +85,7 @@ jobs:
         with:
           name: android-debug
           path: build/app/outputs/flutter-apk/lhht-app-debug.apk
-          
+
   build-ios:
     name: Build iOS
     runs-on: macos-latest
@@ -125,9 +125,69 @@ jobs:
           name: ios-release
           path: build/ios/iphoneos/lhht-ai-assistant.ipa
 
+  build-windows:
+    name: Build Windows
+    runs-on: windows-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.29.2'
+          channel: 'stable'
+          cache: true
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Install Windows build tools
+        run: |
+          # 安装 Visual Studio 构建工具
+          choco install visualstudio2022buildtools -y
+          choco install visualstudio2022-workload-vctools -y
+
+      - name: Setup Windows dependencies
+        run: |
+          # 确保 Windows 桌面支持已启用
+          flutter config --enable-windows-desktop
+          
+          # 检查 Windows 依赖
+          flutter doctor -v
+
+      - name: Build Windows (Release)
+        run: flutter build windows --release
+
+      - name: Package Windows build
+        run: |
+          cd build/windows/runner/Release
+          
+          # 创建安装包或可执行文件包
+          # 方法1: 直接压缩整个 Release 文件夹
+          Compress-Archive -Path * -DestinationPath ../../../lhht-windows-release.zip -Force
+          
+          # 方法2: 如果需要包含所有依赖文件，创建一个包含所有文件的文件夹
+          New-Item -ItemType Directory -Path ../../../windows-package -Force
+          Copy-Item -Path * -Destination ../../../windows-package/ -Recurse -Force
+          
+          # 创建可执行文件的快捷方式脚本
+          @"
+@echo off
+start "" "Runner.exe"
+"@ | Out-File -FilePath ../../../windows-package/Start-App.bat -Encoding ASCII
+
+      - name: Upload Windows Build
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: |
+            build/windows/runner/Release/lhht-windows-release.zip
+            build/windows-package/
+
   create-release:
     name: Create GitHub Release
-    needs: [build-android, build-ios]
+    needs: [build-android, build-ios, build-windows]
     runs-on: ubuntu-latest
     steps:
       - name: Download Android Artifact
@@ -141,6 +201,12 @@ jobs:
         with:
           name: ios-release
           path: ios-release
+
+      - name: Download Windows Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-release
+          path: windows-release
 
       - name: Get tag name
         id: tag_name
@@ -157,4 +223,5 @@ jobs:
           prerelease: false
           files: |
             android-debug/lhht-app-debug.apk
-            ios-release/lhht-ai-assistant.ipa 
+            ios-release/lhht-ai-assistant.ipa
+            windows-release/lhht-windows-release.zip
